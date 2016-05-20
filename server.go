@@ -19,6 +19,11 @@ type packetHandler interface {
 	run()
 }
 
+type packetToSend struct {
+	addr *net.UDPAddr
+	p    []byte
+}
+
 // A Server of QUIC
 type Server struct {
 	conns      []*net.UDPConn
@@ -33,6 +38,8 @@ type Server struct {
 	streamCallback StreamCallback
 
 	newSession func(conn connection, v protocol.VersionNumber, connectionID protocol.ConnectionID, sCfg *handshake.ServerConfig, streamCallback StreamCallback, closeCallback closeCallback) (packetHandler, error)
+
+	packetsToSend chan packetToSend
 }
 
 // NewServer makes a new server
@@ -57,6 +64,7 @@ func NewServer(tlsConfig *tls.Config, cb StreamCallback) (*Server, error) {
 		streamCallback: cb,
 		sessions:       map[protocol.ConnectionID]packetHandler{},
 		newSession:     newSession,
+		packetsToSend:  make(chan packetToSend, 128),
 	}, nil
 }
 
@@ -75,6 +83,12 @@ func (s *Server) ListenAndServe(address string) error {
 	s.conns = append(s.conns, conn)
 	s.connsMutex.Unlock()
 
+	go func() {
+		for p := range s.packetsToSend {
+			conn.WriteToUDP(p.p, p.addr)
+		}
+	}()
+
 	for {
 		data := make([]byte, protocol.MaxPacketSize)
 		n, remoteAddr, err := conn.ReadFromUDP(data)
@@ -92,6 +106,7 @@ func (s *Server) ListenAndServe(address string) error {
 func (s *Server) Close() error {
 	s.connsMutex.Lock()
 	defer s.connsMutex.Unlock()
+	close(s.packetsToSend)
 	for _, c := range s.conns {
 		err := c.Close()
 		if err != nil {
@@ -131,7 +146,7 @@ func (s *Server) handlePacket(conn *net.UDPConn, remoteAddr *net.UDPAddr, packet
 	if !ok {
 		utils.Infof("Serving new connection: %x, version %d from %v", hdr.ConnectionID, hdr.VersionNumber, remoteAddr)
 		session, err = s.newSession(
-			&udpConn{conn: conn, currentAddr: remoteAddr},
+			&udpConn{conn: conn, currentAddr: remoteAddr, server: s},
 			hdr.VersionNumber,
 			hdr.ConnectionID,
 			s.scfg,
