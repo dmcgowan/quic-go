@@ -91,6 +91,7 @@ type Session struct {
 func newSession(conn connection, v protocol.VersionNumber, connectionID protocol.ConnectionID, sCfg *handshake.ServerConfig, streamCallback StreamCallback, closeCallback closeCallback) (packetHandler, error) {
 	stopWaitingManager := ackhandler.NewStopWaitingManager()
 	connectionParametersManager := handshake.NewConnectionParamatersManager()
+	flowControlManager := flowcontrol.NewFlowControlManager(connectionParametersManager)
 
 	session := &Session{
 		connectionID:                connectionID,
@@ -101,11 +102,11 @@ func newSession(conn connection, v protocol.VersionNumber, connectionID protocol
 		sentPacketHandler:           ackhandler.NewSentPacketHandler(stopWaitingManager),
 		receivedPacketHandler:       ackhandler.NewReceivedPacketHandler(),
 		stopWaitingManager:          stopWaitingManager,
-		flowControlManager:          flowcontrol.NewFlowControlManager(connectionParametersManager),
 		flowController:              flowcontrol.NewFlowController(0, connectionParametersManager),
+		flowControlManager:          flowControlManager,
 		windowUpdateManager:         newWindowUpdateManager(),
 		blockedManager:              newBlockedManager(),
-		streamFrameQueue:            newStreamFrameQueue(),
+		streamFrameQueue:            newStreamFrameQueue(flowControlManager),
 		receivedPackets:             make(chan receivedPacket, protocol.MaxSessionUnprocessedPackets),
 		closeChan:                   make(chan struct{}, 1),
 		sendingScheduled:            make(chan struct{}, 1),
@@ -357,6 +358,12 @@ func (s *Session) handleWindowUpdateFrame(frame *frames.WindowUpdateFrame) error
 		if updated {
 			s.blockedManager.RemoveBlockedStream(frame.StreamID)
 		}
+	}
+
+	// TODO: only use this once the other flowController is removed
+	_, err := s.flowControlManager.UpdateWindow(frame.StreamID, frame.ByteOffset)
+	if err != nil {
+		return err
 	}
 
 	return nil
